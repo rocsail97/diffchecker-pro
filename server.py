@@ -16,6 +16,7 @@ import subprocess
 import urllib.request
 import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 PORT = 28833
 DEFAULT_BASE_URL = "https://ai-gateway.weex.tech/v1"
@@ -39,44 +40,54 @@ def find_index_html():
 class BridgeHandler(BaseHTTPRequestHandler):
     def _send_cors_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, HEAD')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+
+    def _respond(self, status_code, body_bytes, content_type='application/json; charset=utf-8'):
+        self.send_response(status_code)
+        self._send_cors_headers()
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', str(len(body_bytes)))
+        self.send_header('Connection', 'keep-alive')
+        self.end_headers()
+        if self.command != 'HEAD':
+            try:
+                self.wfile.write(body_bytes)
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    def _respond_json(self, status_code, data):
+        self._respond(status_code, json.dumps(data, ensure_ascii=False).encode('utf-8'), 'application/json; charset=utf-8')
 
     def do_OPTIONS(self):
         self.send_response(200)
         self._send_cors_headers()
+        self.send_header('Content-Length', '0')
         self.end_headers()
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def do_GET(self):
         if self.path in ('/', '/index.html', '/diffchecker'):
             index_path = find_index_html()
             if index_path and os.path.exists(index_path):
-                self.send_response(200)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.end_headers()
                 with open(index_path, 'rb') as f:
-                    self.wfile.write(f.read())
+                    content = f.read()
+                self._respond(200, content, 'text/html; charset=utf-8')
             else:
-                self.send_response(404)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'text/plain; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(b"index.html not found. Please ensure index.html exists in the same folder.")
+                self._respond(404, b"index.html not found. Please ensure index.html exists in the same folder.", 'text/plain; charset=utf-8')
             return
         elif self.path == '/health':
-            self.send_response(200)
-            self._send_cors_headers()
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.end_headers()
-            self.wfile.write(json.dumps({
+            self._respond_json(200, {
                 'status': 'ok',
                 'gateway': DEFAULT_BASE_URL,
                 'default_model': DEFAULT_MODEL
-            }).encode('utf-8'))
+            })
+            return
         else:
-            self.send_response(404)
-            self.end_headers()
+            self._respond(404, b"Not Found", 'text/plain; charset=utf-8')
 
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -85,10 +96,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             req_json = json.loads(post_data.decode('utf-8'))
         except Exception as e:
-            self.send_response(400)
-            self._send_cors_headers()
-            self.end_headers()
-            self.wfile.write(json.dumps({'error': f'Invalid JSON: {str(e)}'}).encode('utf-8'))
+            self._respond_json(400, {'error': f'Invalid JSON: {str(e)}'})
             return
 
         # 路由 1: 唤起 ChatGPT / Codex 桌面端新建对话
@@ -128,17 +136,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
 
-                self.send_response(200)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps({'status': 'success', 'message': '已在桌面客户端开启新对话并填入代码上下文'}).encode('utf-8'))
+                self._respond_json(200, {'status': 'success', 'message': '已在桌面客户端开启新对话并填入代码上下文'})
             except Exception as e:
-                self.send_response(500)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': str(e)}).encode('utf-8'))
+                self._respond_json(500, {'error': str(e)})
             return
 
         # 路由 2: 后端转发 WEEX AI Gateway 对话请求
@@ -174,7 +174,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
             model = aliases.get(model_key, raw_model)
 
             endpoint = base_url.rstrip('/') + '/chat/completions'
-            # 规范 payload: 传入 model、messages 以及 max_completion_tokens
             max_tokens = req_json.get('max_completion_tokens') or 8000
             payload = {
                 'model': model,
@@ -196,46 +195,64 @@ class BridgeHandler(BaseHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(req, timeout=120) as resp:
                     resp_body = resp.read()
-                    self.send_response(resp.status)
-                    self._send_cors_headers()
-                    self.send_header('Content-Type', 'application/json; charset=utf-8')
-                    self.end_headers()
-                    self.wfile.write(resp_body)
+                    self._respond(resp.status, resp_body, 'application/json; charset=utf-8')
             except urllib.error.HTTPError as e:
                 err_content = e.read().decode('utf-8', errors='replace')
-                self.send_response(e.code)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
                 try:
                     err_json = json.loads(err_content)
-                    self.wfile.write(json.dumps({'error': err_json.get('error', {}).get('message', err_content)}).encode('utf-8'))
+                    self._respond_json(e.code, {'error': err_json.get('error', {}).get('message', err_content)})
                 except Exception:
-                    self.wfile.write(json.dumps({'error': f'HTTP {e.code}: {err_content}'}).encode('utf-8'))
+                    self._respond_json(e.code, {'error': f'HTTP {e.code}: {err_content}'})
             except urllib.error.URLError as e:
-                self.send_response(502)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': f'连接网关失败: {str(e.reason)}，请确认网络连接或 VPN 状态'}).encode('utf-8'))
+                self._respond_json(502, {'error': f'连接网关失败: {str(e.reason)}，请确认网络连接或 VPN 状态'})
             except Exception as e:
-                self.send_response(500)
-                self._send_cors_headers()
-                self.send_header('Content-Type', 'application/json; charset=utf-8')
-                self.end_headers()
-                self.wfile.write(json.dumps({'error': f'发生异常: {str(e)}'}).encode('utf-8'))
+                self._respond_json(500, {'error': f'发生异常: {str(e)}'})
             return
 
-        self.send_response(404)
-        self.end_headers()
+        # 路由 3: 抓取并解析 Unified Diff 网页/链接内容 (绕过跨域 CORS)
+        if self.path == '/api/fetch_url':
+            target_url = req_json.get('url', '').strip()
+            if not target_url:
+                self._respond_json(400, {'error': '缺少 URL 参数'})
+                return
+            try:
+                # 针对 GitHub PR 链接自动转换为 .diff
+                if 'github.com' in target_url and '/pull/' in target_url and not target_url.endswith('.diff') and not target_url.endswith('.patch'):
+                    target_url = target_url.split('?')[0].rstrip('/') + '.diff'
+
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/plain, text/x-diff, text/html, */*'
+                }
+                req = urllib.request.Request(target_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    raw_bytes = resp.read()
+                    text_content = raw_bytes.decode('utf-8', errors='replace')
+                    self._respond_json(200, {'status': 'success', 'url': target_url, 'content': text_content})
+            except Exception as e:
+                self._respond_json(500, {'error': f'抓取 URL 失败: {str(e)}'})
+            return
+
+        self._respond(404, b"Not Found", 'text/plain; charset=utf-8')
+        return
 
     def log_message(self, format, *args):
         return
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        ex_type, ex_val, _ = sys.exc_info()
+        if ex_type in (BrokenPipeError, ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
 def run_server():
     server_address = ('127.0.0.1', PORT)
     try:
-        httpd = HTTPServer(server_address, BridgeHandler)
+        httpd = ThreadedHTTPServer(server_address, BridgeHandler)
         print(f"Code Diff AI Bridge running on http://127.0.0.1:{PORT}")
         httpd.serve_forever()
     except OSError as e:

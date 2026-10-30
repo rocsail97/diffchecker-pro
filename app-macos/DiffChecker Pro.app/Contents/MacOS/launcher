@@ -1,32 +1,36 @@
 #!/bin/bash
-# =============================================================
-#  DiffChecker Pro —— 真正自包含、跨机通用的本地启动器
-# =============================================================
-
 set -uo pipefail
 
 BUNDLE_CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
 RESOURCES_DIR="$BUNDLE_CONTENTS/Resources"
 LOCAL_SERVER="$RESOURCES_DIR/server.py"
 
-# 1. 确保后台本地 AI 桥接服务已启动 (端口 28833)
+# 1. 确保后台本地服务已启动 (端口 28833)
 if ! curl -s -m 1 http://127.0.0.1:28833/health >/dev/null 2>&1; then
   if [ -f "$LOCAL_SERVER" ]; then
     python3 "$LOCAL_SERVER" >/dev/null 2>&1 &
   elif [ -f "$(dirname "$0")/../../server.py" ]; then
     python3 "$(dirname "$0")/../../server.py" >/dev/null 2>&1 &
   fi
-  sleep 0.5
+  for i in {1..20}; do
+    if curl -s -m 0.5 http://127.0.0.1:28833/health >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
 fi
 
 URL="http://127.0.0.1:28833/"
 
-# 2. 查找可用 Chromium 系浏览器以原生独立 App 窗口模式启动
+# 2. 独立 Profile 目录，确保多开/后台运行时绝对能秒级拉起独立 App 窗口
+PROFILE_DIR="$HOME/Library/Application Support/DiffCheckerPro/profile"
+mkdir -p "$PROFILE_DIR"
+
 CHROME_PATHS=(
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-  "/Applications/Chromium.app/Contents/MacOS/Chromium"
-  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+  "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+  "/Applications/Chromium.app/Contents/MacOS/Chromium"
   "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   "$HOME/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
 )
@@ -42,7 +46,10 @@ done
 if [ -n "$CHROME_BIN" ]; then
   exec "$CHROME_BIN" \
     --app="$URL" \
-    --window-size=1380,900 \
+    --user-data-dir="$PROFILE_DIR" \
+    --window-size=1400,920 \
+    --no-first-run \
+    --no-default-browser-check \
     2>/dev/null
 else
   open "$URL"
