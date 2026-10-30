@@ -11,7 +11,9 @@
 
 import sys
 import os
+import re
 import json
+import hashlib
 import subprocess
 import urllib.request
 import urllib.error
@@ -35,6 +37,122 @@ def find_index_html():
     for p in candidates:
         if os.path.isfile(p):
             return p
+    return None
+
+def split_diff_files(diff_text):
+    files = []
+    current_file = None
+    for line in diff_text.split('\n'):
+        if line.startswith('diff --git '):
+            if current_file:
+                current_file['content'] = '\n'.join(current_file['lines'])
+                files.append(current_file)
+            m = re.match(r'diff --git a/(.*?) b/(.*)', line)
+            path = m.group(2) if m else 'unknown'
+            path_sha1 = hashlib.sha1(path.encode('utf-8')).hexdigest()
+            current_file = {
+                'path': path,
+                'sha1': path_sha1,
+                'lines': [line]
+            }
+        elif current_file:
+            current_file['lines'].append(line)
+    if current_file:
+        current_file['content'] = '\n'.join(current_file['lines'])
+        files.append(current_file)
+    return files
+
+def find_or_init_repo(host, repo_full_path):
+    repo_name = repo_full_path.split('/')[-1]
+    candidates = [
+        f'/Users/pr-dwu-rabby/Documents/ChatGPT/weex/{repo_name}',
+        f'/Users/pr-dwu-rabby/IdeaProjects/Multica/{repo_name}',
+        os.path.expanduser(f'~/Documents/ChatGPT/weex/{repo_name}'),
+        os.path.expanduser(f'~/IdeaProjects/Multica/{repo_name}'),
+        os.path.expanduser(f'~/{repo_name}'),
+        os.path.expanduser(f'~/.cache/diffchecker-pro/repos/{repo_name}')
+    ]
+    for c in candidates:
+        if os.path.isdir(os.path.join(c, '.git')):
+            return os.path.join(c, '.git')
+        if os.path.isfile(os.path.join(c, 'HEAD')):
+            return c
+
+    cache_dir = os.path.expanduser(f'~/.cache/diffchecker-pro/repos/{repo_name}')
+    os.makedirs(cache_dir, exist_ok=True)
+    subprocess.run(['git', 'init', '--bare', cache_dir], capture_output=True)
+    remote_url = f'git@{host}:{repo_full_path}.git'
+    subprocess.run(['git', f'--git-dir={cache_dir}', 'remote', 'add', 'origin', remote_url], capture_output=True)
+    return cache_dir
+
+def fetch_git_diff_by_url(target_url):
+    anchor = target_url.split('#')[1] if '#' in target_url else ''
+    clean_url = target_url.split('#')[0]
+
+    # 1. Commit URL: e.g. https://git.weex.tech/fluidity/analysis_script/-/commit/013264fcd7c260e0b3d6d2957a1d650b7b239562
+    m_commit = re.search(r'https?://([^/]+)/(.+?)/(?:-/)?(?:commit|commits)/([0-9a-fA-F]{7,40})', clean_url)
+    if m_commit:
+        host = m_commit.group(1)
+        repo = m_commit.group(2).removesuffix('.git')
+        commit = m_commit.group(3)
+        git_dir = find_or_init_repo(host, repo)
+        remote = f'git@{host}:{repo}.git'
+        res = subprocess.run(['git', f'--git-dir={git_dir}', 'show', commit], capture_output=True, text=True)
+        if res.returncode != 0:
+            subprocess.run(['git', f'--git-dir={git_dir}', 'fetch', remote, commit], capture_output=True)
+            res = subprocess.run(['git', f'--git-dir={git_dir}', 'show', 'FETCH_HEAD'], capture_output=True, text=True)
+        if res.returncode == 0:
+            files = split_diff_files(res.stdout)
+            matched = None
+            if anchor:
+                for f in files:
+                    if f['sha1'] == anchor:
+                        matched = f
+                        break
+            if not matched and files:
+                matched = files[0]
+            return {
+                'status': 'success',
+                'type': 'gitlab_commit',
+                'repo': repo,
+                'target': commit,
+                'file_hash': anchor,
+                'matched_file': matched['path'] if matched else None,
+                'content': matched['content'] if matched else res.stdout,
+                'files': [{'path': f['path'], 'sha1': f['sha1'], 'content': f['content'], 'lines_count': len(f['lines'])} for f in files]
+            }
+
+    # 2. Merge Request URL: e.g. https://git.weex.tech/fluidity/analysis_script/-/merge_requests/1719/diffs#3f610f8a847bf70a384de4c1fbe73d3b83bb3243
+    m_mr = re.search(r'https?://([^/]+)/(.+?)/(?:-/)?(?:merge_requests|merge_request)/(\d+)', clean_url)
+    if m_mr:
+        host = m_mr.group(1)
+        repo = m_mr.group(2).removesuffix('.git')
+        mr_id = m_mr.group(3)
+        git_dir = find_or_init_repo(host, repo)
+        remote = f'git@{host}:{repo}.git'
+        ref = f'refs/merge-requests/{mr_id}/head'
+        subprocess.run(['git', f'--git-dir={git_dir}', 'fetch', remote, ref], capture_output=True)
+        res = subprocess.run(['git', f'--git-dir={git_dir}', 'show', 'FETCH_HEAD'], capture_output=True, text=True)
+        if res.returncode == 0:
+            files = split_diff_files(res.stdout)
+            matched = None
+            if anchor:
+                for f in files:
+                    if f['sha1'] == anchor:
+                        matched = f
+                        break
+            if not matched and files:
+                matched = files[0]
+            return {
+                'status': 'success',
+                'type': 'gitlab_mr',
+                'repo': repo,
+                'target': f'MR !{mr_id}',
+                'file_hash': anchor,
+                'matched_file': matched['path'] if matched else None,
+                'content': matched['content'] if matched else res.stdout,
+                'files': [{'path': f['path'], 'sha1': f['sha1'], 'content': f['content'], 'lines_count': len(f['lines'])} for f in files]
+            }
     return None
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -209,26 +327,44 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._respond_json(500, {'error': f'发生异常: {str(e)}'})
             return
 
-        # 路由 3: 抓取并解析 Unified Diff 网页/链接内容 (绕过跨域 CORS)
+        # 路由 3: 抓取并解析 Unified Diff 网页/链接内容 (支持 git.weex.tech GitLab Commit/MR 及 GitHub)
         if self.path == '/api/fetch_url':
             target_url = req_json.get('url', '').strip()
             if not target_url:
                 self._respond_json(400, {'error': '缺少 URL 参数'})
                 return
+
+            # 1. 优先使用本地 Git / SSH 获取 git.weex.tech GitLab Commit、Merge Request 或本地仓库差异
             try:
+                git_res = fetch_git_diff_by_url(target_url)
+                if git_res and git_res.get('status') == 'success':
+                    git_res['url'] = target_url
+                    self._respond_json(200, git_res)
+                    return
+            except Exception as e:
+                print(f"Git CLI fetch warning: {e}")
+
+            # 2. 通用 HTTP 方式回退
+            try:
+                fetch_url = target_url
                 # 针对 GitHub PR 链接自动转换为 .diff
-                if 'github.com' in target_url and '/pull/' in target_url and not target_url.endswith('.diff') and not target_url.endswith('.patch'):
-                    target_url = target_url.split('?')[0].rstrip('/') + '.diff'
+                if 'github.com' in fetch_url and '/pull/' in fetch_url and not fetch_url.endswith('.diff') and not fetch_url.endswith('.patch'):
+                    fetch_url = fetch_url.split('?')[0].rstrip('/') + '.diff'
 
                 headers = {
                     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept': 'text/plain, text/x-diff, text/html, */*'
                 }
-                req = urllib.request.Request(target_url, headers=headers)
+                req = urllib.request.Request(fetch_url, headers=headers)
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     raw_bytes = resp.read()
                     text_content = raw_bytes.decode('utf-8', errors='replace')
-                    self._respond_json(200, {'status': 'success', 'url': target_url, 'content': text_content})
+                    self._respond_json(200, {
+                        'status': 'success',
+                        'url': target_url,
+                        'content': text_content,
+                        'files': [{'path': 'diff_content', 'sha1': '', 'content': text_content}]
+                    })
             except Exception as e:
                 self._respond_json(500, {'error': f'抓取 URL 失败: {str(e)}'})
             return

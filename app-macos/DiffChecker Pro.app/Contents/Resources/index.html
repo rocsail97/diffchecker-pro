@@ -492,6 +492,72 @@ html, body {
 }
 
 /* ============================================================
+   Multi-file Switcher Bar for GitLab MRs / Multi-file commits
+============================================================ */
+.diff-file-switcher-bar {
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  overflow-x: auto;
+  z-index: 25;
+}
+.file-switcher-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+  white-space: nowrap;
+}
+.file-switcher-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  overflow-x: auto;
+}
+.file-tab-btn {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.file-tab-btn:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+.file-tab-btn.active {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #ffffff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.file-tab-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #475569;
+}
+.file-tab-btn.active .file-tab-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+}
+
+/* ============================================================
    Main Container Area (Tab Views)
 ============================================================ */
 #content-container {
@@ -1841,6 +1907,14 @@ html, body {
 
     <!-- 1. Text Diff View -->
     <div class="tab-view active" id="view-text">
+      <!-- Multi-File Switcher Bar for GitLab MR / Multi-file Commits -->
+      <div id="diff-file-switcher-bar" style="display:none;" class="diff-file-switcher-bar">
+        <div class="file-switcher-label">
+          <span>📁 变更文件清单:</span>
+        </div>
+        <div id="file-switcher-tabs" class="file-switcher-tabs"></div>
+      </div>
+
       <!-- Split Mode -->
       <main id="workspace">
 
@@ -2132,10 +2206,11 @@ html, body {
       <div id="import-url-section" class="import-section">
         <label class="import-input-label">网页地址 / Unified Diff URL：</label>
         <div class="import-url-row">
-          <input type="text" id="unified-url-input" class="import-text-input" placeholder="例如：https://github.com/.../pull/12.diff 或任意补丁页面">
-          <button class="pane-tool-btn" style="border:1px solid #cbd5e1; padding:6px 12px; border-radius:6px; white-space:nowrap;" onclick="fillSampleUnifiedUrl()">填入示例链接</button>
+          <input type="text" id="unified-url-input" class="import-text-input" placeholder="例如：https://git.weex.tech/.../commit/... 或 /merge_requests/.../diffs#hash">
+          <button class="pane-tool-btn" style="border:1px solid #cbd5e1; padding:6px 12px; border-radius:6px; white-space:nowrap;" onclick="fillSampleGitlabMrUrl()" title="填入 MR 1719 差异链接">示例 MR 差异</button>
+          <button class="pane-tool-btn" style="border:1px solid #cbd5e1; padding:6px 12px; border-radius:6px; white-space:nowrap;" onclick="fillSampleGitlabCommitUrl()" title="填入 Commit 013264f... 链接">示例 Commit</button>
         </div>
-        <div class="import-hint">💡 提示：若输入 GitHub PR 链接，后台将自动解析并获取干净的差异补丁。</div>
+        <div class="import-hint">💡 提示：原生支持 <strong>git.weex.tech</strong> 内部 GitLab 提交链接与 Merge Request diffs 锚点链接（支持 <code>#3f610f8a847bf70a384de4c1fbe73d3b83bb3243</code> 文件精准定位），以及 GitHub PR！</div>
       </div>
 
       <!-- Option 2: Text input -->
@@ -3775,7 +3850,15 @@ function switchImportType(type) {
 }
 
 function fillSampleUnifiedUrl() {
-  document.getElementById('unified-url-input').value = 'https://raw.githubusercontent.com/rocsail97/diffchecker-pro/main/requirements.txt';
+  fillSampleGitlabMrUrl();
+}
+
+function fillSampleGitlabMrUrl() {
+  document.getElementById('unified-url-input').value = 'https://git.weex.tech/fluidity/analysis_script/-/merge_requests/1719/diffs#3f610f8a847bf70a384de4c1fbe73d3b83bb3243';
+}
+
+function fillSampleGitlabCommitUrl() {
+  document.getElementById('unified-url-input').value = 'https://git.weex.tech/fluidity/analysis_script/-/commit/013264fcd7c260e0b3d6d2957a1d650b7b239562';
 }
 
 function fillSampleUnifiedText() {
@@ -3910,12 +3993,80 @@ function parseUnifiedDiffToSides(rawText) {
   };
 }
 
+window.__importedFiles = [];
+window.__activeImportedFile = null;
+
+function renderFileSwitcherBar(files, activePath) {
+  const bar = document.getElementById('diff-file-switcher-bar');
+  const tabs = document.getElementById('file-switcher-tabs');
+  if (!bar || !tabs) return;
+
+  if (!files || files.length <= 1) {
+    bar.style.display = 'none';
+    return;
+  }
+
+  bar.style.display = 'flex';
+  tabs.innerHTML = '';
+  files.forEach(f => {
+    const btn = document.createElement('button');
+    const isActive = (f.path === activePath);
+    btn.className = `file-tab-btn ${isActive ? 'active' : ''}`;
+    btn.innerHTML = `<span>📄 ${escapeHtml(f.path)}</span>${f.lines_count ? `<span class="file-tab-badge">${f.lines_count} 行</span>` : ''}`;
+    btn.onclick = () => switchActiveDiffFile(f.path);
+    tabs.appendChild(btn);
+  });
+}
+
+function switchActiveDiffFile(path) {
+  if (!window.__importedFiles) return;
+  const target = window.__importedFiles.find(f => f.path === path);
+  if (!target) return;
+
+  window.__activeImportedFile = path;
+  renderFileSwitcherBar(window.__importedFiles, path);
+
+  const result = parseUnifiedDiffToSides(target.content);
+  loadSidesToWorkspace(result, path);
+}
+
+function loadSidesToWorkspace(result, fileName) {
+  let orig = result.originalText;
+  let chg = result.changedText;
+
+  // 如果是纯新增文件，给出清晰的原始版本标注
+  if (!orig && chg) {
+    orig = `// ------------------------------------------------------------\n// 📄 【新建文件】 ${fileName || '当前文件'}\n// 本次提交/合并请求全新创建该文件，无历史版本\n// ------------------------------------------------------------`;
+  }
+
+  document.getElementById('editor-left').value = orig;
+  document.getElementById('editor-right').value = chg;
+
+  syncLines('left');
+  syncLines('right');
+
+  switchNavTab('text');
+  setViewMode('split');
+  runFindDifference();
+
+  const toast = document.getElementById('diff-nav-toast');
+  const textSpan = document.getElementById('diff-nav-text');
+  if (toast && textSpan) {
+    textSpan.innerHTML = `🎉 <strong>已载入文件:</strong> ${escapeHtml(fileName || '代码差异')}，左右上方「<strong>🤖 AI 分析</strong>」已就绪！`;
+    toast.classList.add('show');
+    setTimeout(() => { toast.classList.remove('show'); }, 6000);
+  }
+}
+
 async function executeUnifiedImport() {
   const btn = document.getElementById('btn-do-import');
   const msg = document.getElementById('import-status-msg');
   msg.style.display = 'none';
 
   let diffText = '';
+  let matchedFileName = null;
+  window.__importedFiles = [];
+  window.__activeImportedFile = null;
 
   if (currentImportType === 'url') {
     const url = document.getElementById('unified-url-input').value.trim();
@@ -3928,7 +4079,7 @@ async function executeUnifiedImport() {
     }
 
     btn.disabled = true;
-    btn.innerHTML = '<span>⏳ 正在获取网页 Unified 差异...</span>';
+    btn.innerHTML = '<span>⏳ 正在获取差异 (支持 GitLab Commit / MR 及 GitHub)...</span>';
 
     try {
       const resp = await fetch('http://127.0.0.1:28833/api/fetch_url', {
@@ -3940,7 +4091,13 @@ async function executeUnifiedImport() {
       if (!resp.ok || data.error) {
         throw new Error(data.error || '获取链接失败');
       }
+
       diffText = data.content || '';
+      matchedFileName = data.matched_file || null;
+      if (data.files && data.files.length > 0) {
+        window.__importedFiles = data.files;
+        window.__activeImportedFile = data.matched_file || data.files[0].path;
+      }
     } catch (err) {
       msg.textContent = `❌ 抓取失败: ${err.message}`;
       msg.style.display = 'block';
@@ -3972,34 +4129,21 @@ async function executeUnifiedImport() {
     return;
   }
 
-  // 1. 回填左右两侧文本
-  document.getElementById('editor-left').value = result.originalText;
-  document.getElementById('editor-right').value = result.changedText;
-
-  // 2. 刷新行号与字符统计
-  syncLines('left');
-  syncLines('right');
-
-  // 3. 关闭弹窗
+  // 关闭弹窗并重置按钮
   closeUnifiedImportModal();
   btn.disabled = false;
   btn.innerHTML = '<span>⚡ 立即解析并跳回第一页双栏展示</span>';
 
-  // 4. 跳回第一页 (Text 代码对比 tab) 并设为 Split 分屏视图
-  switchNavTab('text');
-  setViewMode('split');
-
-  // 5. 立即执行对比与高亮
-  runFindDifference();
-
-  // 6. 弹出通知提示两边 AI 分析就绪
-  const toast = document.getElementById('diff-nav-toast');
-  const textSpan = document.getElementById('diff-nav-text');
-  if (toast && textSpan) {
-    textSpan.innerHTML = `🎉 <strong>Unified 差异解析成功！</strong>已还原为双栏代码，点击左右上方「<strong>🤖 AI 分析</strong>」即可分析代码步骤与配置！`;
-    toast.classList.add('show');
-    setTimeout(() => { toast.classList.remove('show'); }, 6000);
+  // 1. 如果有解析出的多文件列表，渲染切换栏
+  if (window.__importedFiles && window.__importedFiles.length > 1) {
+    renderFileSwitcherBar(window.__importedFiles, window.__activeImportedFile);
+  } else {
+    const bar = document.getElementById('diff-file-switcher-bar');
+    if (bar) bar.style.display = 'none';
   }
+
+  // 2. 加载选中的文件内容并跳回第一页
+  loadSidesToWorkspace(result, window.__activeImportedFile || matchedFileName || 'Unified Diff');
 }
 
 // 本地文件上传读取函数
